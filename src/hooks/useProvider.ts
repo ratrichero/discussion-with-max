@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { ModelInfo, Provider, Message, ChatSettings } from '../types';
+import { ModelInfo, Provider, Message, ChatSettings, ApiContent, TextContent, ImageContent } from '../types';
 import { NVIDIA_FREE_MODELS } from '../data/nvidia-free-models';
 
 export function useProvider(
@@ -17,6 +17,9 @@ export function useProvider(
 
   // Track proxy availability: null = unknown, true/false = detected
   const proxyAvailableRef = useRef<boolean | null>(null);
+
+  // AbortController for streaming
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const fetchModels = useCallback(async () => {
     if (!provider) { setError('Chưa chọn provider'); return; }
@@ -79,6 +82,21 @@ export function useProvider(
     }
   }, [provider?.id, provider?.baseUrl, provider?.isBuiltin, provider?.filterFreeOnly, provider?.modelsEndpoint, apiKey]);
 
+  // Build API content from message (supports text + images for vision models)
+  function buildApiContent(message: Message): ApiContent {
+    if (message.images && message.images.length > 0) {
+      const parts: Array<TextContent | ImageContent> = [];
+      if (message.content) {
+        parts.push({ type: 'text', text: message.content });
+      }
+      for (const img of message.images) {
+        parts.push({ type: 'image_url', image_url: { url: img } });
+      }
+      return parts;
+    }
+    return message.content;
+  }
+
   // ---- Send message with proxy support ----
   const sendMessage = useCallback(async (
     messages: Message[],
@@ -91,6 +109,11 @@ export function useProvider(
     if (!provider) { onError('Chưa chọn provider'); return; }
     if (!apiKey) { onError('Vui lòng nhập API Key'); return; }
 
+    // Cancel previous request if any
+    abortControllerRef.current?.abort();
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const systemMessage = settings.systemPrompt
         ? [{ role: 'system', content: settings.systemPrompt }]
@@ -98,7 +121,7 @@ export function useProvider(
 
       const apiMessages = [
         ...systemMessage,
-        ...messages.map(m => ({ role: m.role, content: m.content }))
+        ...messages.map(m => ({ role: m.role, content: buildApiContent(m) }))
       ];
 
       const bodyPayload: Record<string, unknown> = {
@@ -117,9 +140,9 @@ export function useProvider(
       let response: Response;
 
       if (needsProxy) {
-        response = await sendViaProxy(provider, apiKey, bodyPayload);
+        response = await sendViaProxy(provider, apiKey, bodyPayload, abortController.signal);
       } else {
-        response = await sendDirect(provider, apiKey, bodyPayload);
+        response = await sendDirect(provider, apiKey, bodyPayload, abortController.signal);
       }
 
       // ---- Handle error responses ----
@@ -140,6 +163,8 @@ export function useProvider(
       let buffer = '';
 
       while (true) {
+        if (abortController.signal.aborted) break;
+
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -164,19 +189,25 @@ export function useProvider(
       }
 
       // Process remaining buffer
-      if (buffer.startsWith('data: ')) {
-        const data = buffer.slice(6);
-        if (data !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(data);
-            const content = parsed.choices?.[0]?.delta?.content;
-            if (content) onChunk(content);
-          } catch { /* ignore */ }
+      if (!abortController.signal.aborted) {
+        if (buffer.startsWith('data: ')) {
+          const data = buffer.slice(6);
+          if (data !== '[DONE]') {
+            try {
+              const parsed = JSON.parse(data);
+              const content = parsed.choices?.[0]?.delta?.content;
+              if (content) onChunk(content);
+            } catch { /* ignore */ }
+          }
         }
-      }
 
-      onDone();
+        onDone();
+      }
     } catch (err: unknown) {
+      if ((err as Error).name === 'AbortError') {
+        // Silent abort - don't call onError
+        return;
+      }
       const error = err as Error & { code?: string };
       onError(error.message || 'Đã xảy ra lỗi', error.code);
     }
@@ -186,17 +217,19 @@ export function useProvider(
   async function sendViaProxy(
     provider: Provider,
     apiKey: string,
-    bodyPayload: Record<string, unknown>
+    bodyPayload: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<Response> {
     // If we already know proxy is NOT available → go direct immediately
     if (proxyAvailableRef.current === false) {
-      return sendDirect(provider, apiKey, bodyPayload);
+      return sendDirect(provider, apiKey, bodyPayload, signal);
     }
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal,
         body: JSON.stringify({
           baseUrl: provider.baseUrl,
           apiKey,
@@ -210,7 +243,7 @@ export function useProvider(
       if (response.status === 404 && contentType.includes('text/html')) {
         proxyAvailableRef.current = false;
         // Try direct as last resort
-        return sendDirectOrThrowCors(provider, apiKey, bodyPayload);
+        return sendDirectOrThrowCors(provider, apiKey, bodyPayload, signal);
       }
 
       // Proxy IS deployed (any other response, including errors from upstream API)
@@ -227,7 +260,7 @@ export function useProvider(
       }
       // Never confirmed proxy → try direct
       proxyAvailableRef.current = false;
-      return sendDirectOrThrowCors(provider, apiKey, bodyPayload);
+      return sendDirectOrThrowCors(provider, apiKey, bodyPayload, signal);
     }
   }
 
@@ -235,7 +268,8 @@ export function useProvider(
   async function sendDirect(
     provider: Provider,
     apiKey: string,
-    bodyPayload: Record<string, unknown>
+    bodyPayload: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<Response> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -254,6 +288,7 @@ export function useProvider(
     return fetch(url, {
       method: 'POST',
       headers,
+      signal,
       body: JSON.stringify(bodyPayload),
     });
   }
@@ -262,10 +297,11 @@ export function useProvider(
   async function sendDirectOrThrowCors(
     provider: Provider,
     apiKey: string,
-    bodyPayload: Record<string, unknown>
+    bodyPayload: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<Response> {
     try {
-      return await sendDirect(provider, apiKey, bodyPayload);
+      return await sendDirect(provider, apiKey, bodyPayload, signal);
     } catch {
       throw Object.assign(
         new Error(
@@ -278,10 +314,14 @@ export function useProvider(
     }
   }
 
+  const abort = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
+
   const resetModels = useCallback(() => {
     setModels([]);
     lastFetchRef.current = '';
   }, []);
 
-  return { models, loadingModels, error, fetchModels, sendMessage, resetModels };
+  return { models, loadingModels, error, fetchModels, sendMessage, abort, resetModels };
 }

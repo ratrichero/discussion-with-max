@@ -1,9 +1,31 @@
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  tokenUsage?: TokenUsage;
+  images?: string[];
 }
+
+export interface TextContent {
+  type: 'text';
+  text: string;
+}
+
+export interface ImageContent {
+  type: 'image_url';
+  image_url: {
+    url: string;
+  };
+}
+
+export type ApiContent = string | Array<TextContent | ImageContent>;
 
 export interface Conversation {
   id: string;
@@ -13,6 +35,7 @@ export interface Conversation {
   providerId: string;
   createdAt: number;
   updatedAt: number;
+  settings?: ChatSettings;
 }
 
 export interface ModelInfo {
@@ -52,6 +75,13 @@ export interface ChatSettings {
   topK: number;
   frequencyPenalty: number;
   presencePenalty: number;
+}
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  content: string;
+  createdAt: number;
 }
 
 export const DEFAULT_SETTINGS: ChatSettings = {

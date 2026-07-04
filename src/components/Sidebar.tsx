@@ -1,6 +1,8 @@
+import { useState, useMemo } from 'react';
 import { Conversation } from '../types';
-import { Plus, MessageSquare, Trash2, Download, Settings, Key, Sparkles } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Download, Settings, Key, Sparkles, Search, X } from 'lucide-react';
 import { cn } from '../utils/cn';
+import { estimateTokens } from '../utils/token';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -25,6 +27,34 @@ export function Sidebar({
   onOpenApiKey,
   hasApiKey,
 }: SidebarProps) {
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filteredConversations = useMemo(() => {
+    if (!searchQuery.trim()) return conversations;
+
+    const query = searchQuery.toLowerCase().trim();
+    return conversations.filter((conv) => {
+      // Search by title
+      if (conv.title.toLowerCase().includes(query)) return true;
+
+      // Search by providerId
+      if (conv.providerId.toLowerCase().includes(query)) return true;
+
+      // Search by modelId
+      if (conv.modelId.toLowerCase().includes(query)) return true;
+
+      // Search by message content
+      if (conv.messages.some((msg) => msg.content.toLowerCase().includes(query))) return true;
+
+      return false;
+    });
+  }, [conversations, searchQuery]);
+
+  const totalTokens = useMemo(() => {
+    return (messages: Conversation['messages']) =>
+      messages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
+  }, []);
+
   return (
     <aside className="w-64 bg-slate-900 text-white flex flex-col h-full">
       {/* Header with branding */}
@@ -47,6 +77,28 @@ export function Sidebar({
         </button>
       </div>
 
+      {/* Search Input */}
+      <div className="px-3 py-2">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Tìm kiếm hội thoại..."
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-8 pr-8 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 hover:bg-slate-700 rounded transition-colors"
+            >
+              <X className="w-4 h-4 text-slate-400" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Conversations List */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
         {conversations.length === 0 ? (
@@ -56,8 +108,21 @@ export function Sidebar({
               Chưa có cuộc trò chuyện nào
             </p>
           </div>
+        ) : filteredConversations.length === 0 ? (
+          <div className="text-center py-8 px-4">
+            <Search className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+            <p className="text-slate-500 text-xs mb-3">
+              Không tìm thấy kết quả
+            </p>
+            <button
+              onClick={() => setSearchQuery('')}
+              className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              Xoá bộ lọc
+            </button>
+          </div>
         ) : (
-          conversations.map((conv) => (
+          filteredConversations.map((conv) => (
             <div
               key={conv.id}
               className={cn(
@@ -74,6 +139,11 @@ export function Sidebar({
                 <p className="text-[10px] text-slate-500 truncate">
                   {conv.providerId} • {conv.modelId?.split('/').pop()}
                 </p>
+                {conv.messages.length > 0 && (
+                  <p className="text-[10px] text-slate-500">
+                    ~{totalTokens(conv.messages)} tokens
+                  </p>
+                )}
               </div>
               <div className="hidden group-hover:flex items-center gap-0.5">
                 <button

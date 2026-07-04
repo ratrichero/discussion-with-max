@@ -20,7 +20,7 @@ export const NVIDIA_FREE_MODELS: ModelInfo[] = [
   },
   {
     id: 'z-ai/glm-5.2',
-    name: 'GLM 5.2 (Zhipu)',
+    name: 'GLM 5.2(Zhipu)',
     category: 'General',
     contextLength: 128000,
   },

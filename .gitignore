@@ -1,0 +1,14 @@
+.vscode/
+plans/
+
+*.log
+
+
+# Environments
+.env
+.venv
+ENV/
+node_modules/
+test
+
+__pycache__/

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Menu, X, Settings, Sparkles } from 'lucide-react';
+import { Menu, X, Settings, Sparkles, Pencil, Trash2, Check, X as XIcon } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { MessageBubble } from './components/MessageBubble';
 import { ChatInput } from './components/ChatInput';
@@ -14,15 +14,16 @@ import { ErrorBubble } from './components/ErrorBubble';
 import { InstallPrompt } from './components/InstallPrompt';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { useProvider } from './hooks/useProvider';
-import { 
-  Conversation, 
-  Message, 
-  ChatSettings, 
+import {
+  Conversation,
+  Message,
+  ChatSettings,
   DEFAULT_SETTINGS,
   Provider,
   BUILTIN_PROVIDERS,
   ProviderApiKeys,
   ModelInfo,
+  PromptTemplate,
 } from './types';
 
 function App() {
@@ -37,6 +38,7 @@ function App() {
   const [currentConversationId, setCurrentConversationId] = useLocalStorage<string | null>('current-conversation', null);
   const [selectedModelId, setSelectedModelId] = useLocalStorage('selected-model', '');
   const [settings, setSettings] = useLocalStorage<ChatSettings>('chat-settings', DEFAULT_SETTINGS);
+  const [promptTemplates, setPromptTemplates] = useLocalStorage<PromptTemplate[]>('prompt-templates', []);
   
   // UI state
   const [showSidebar, setShowSidebar] = useState(false);
@@ -48,6 +50,7 @@ function App() {
   const [streamingContent, setStreamingContent] = useState('');
   const [chatError, setChatError] = useState<{ message: string; code?: string } | null>(null);
   const [lastUserMessage, setLastUserMessage] = useState<string>('');
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   
@@ -60,7 +63,7 @@ function App() {
     (m as ModelInfo & { providerId?: string }).providerId === selectedProviderId
   );
 
-  const { models, loadingModels, error, fetchModels, sendMessage, resetModels } = useProvider(
+  const { models, loadingModels, error, fetchModels, sendMessage, abort, resetModels } = useProvider(
     currentProvider,
     currentApiKey,
     providerCustomModels
@@ -68,6 +71,45 @@ function App() {
 
   // Get current conversation
   const currentConversation = conversations.find(c => c.id === currentConversationId);
+
+  // Get effective settings: conversation-specific if available, otherwise global
+  const getConversationSettings = useCallback((): ChatSettings => {
+    if (currentConversation?.settings) {
+      return currentConversation.settings;
+    }
+    return settings;
+  }, [currentConversation, settings]);
+
+  // Handle settings change: save to conversation if active, otherwise global
+  const handleSettingsChange = (newSettings: ChatSettings) => {
+    if (currentConversation) {
+      setConversations(convs =>
+        convs.map(c =>
+          c.id === currentConversation.id
+            ? { ...c, settings: newSettings }
+            : c
+        )
+      );
+    } else {
+      setSettings(newSettings);
+    }
+  };
+
+  // Save template
+  const handleSaveTemplate = (name: string, content: string) => {
+    const newTemplate: PromptTemplate = {
+      id: Date.now().toString(),
+      name,
+      content,
+      createdAt: Date.now(),
+    };
+    setPromptTemplates(prev => [...prev, newTemplate]);
+  };
+
+  // Delete template
+  const handleDeleteTemplate = (id: string) => {
+    setPromptTemplates(prev => prev.filter(t => t.id !== id));
+  };
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -150,6 +192,7 @@ function App() {
       providerId: selectedProviderId,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      settings: { ...settings },
     };
     setConversations(prev => [newConversation, ...prev]);
     setCurrentConversationId(newConversation.id);
@@ -163,6 +206,41 @@ function App() {
       const remaining = conversations.filter(c => c.id !== id);
       setCurrentConversationId(remaining.length > 0 ? remaining[0].id : null);
     }
+  };
+
+  // Edit message content
+  const handleEditMessage = (messageId: string, newContent: string) => {
+    if (!currentConversation) return;
+    setConversations(convs =>
+      convs.map(c =>
+        c.id === currentConversation.id
+          ? {
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === messageId ? { ...m, content: newContent } : m
+              ),
+              updatedAt: Date.now(),
+            }
+          : c
+      )
+    );
+    setEditingMessageId(null);
+  };
+
+  // Delete message
+  const handleDeleteMessage = (messageId: string) => {
+    if (!currentConversation) return;
+    setConversations(convs =>
+      convs.map(c =>
+        c.id === currentConversation.id
+          ? {
+              ...c,
+              messages: c.messages.filter(m => m.id !== messageId),
+              updatedAt: Date.now(),
+            }
+          : c
+      )
+    );
   };
 
   // Export conversation
@@ -198,8 +276,15 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  // Stop streaming
+  const handleStop = useCallback(() => {
+    abort();
+    setIsStreaming(false);
+    setStreamingContent('');
+  }, [abort]);
+
   // Send message
-  const handleSendMessage = async (content: string) => {
+  const handleSendMessage = async (content: string, images?: string[]) => {
     if (!currentApiKey || !selectedModelId || !currentProvider) return;
 
     let targetConversation = currentConversation;
@@ -214,6 +299,7 @@ function App() {
         providerId: selectedProviderId,
         createdAt: Date.now(),
         updatedAt: Date.now(),
+        settings: { ...settings },
       };
       setConversations(prev => [newConversation, ...prev]);
       setCurrentConversationId(newConversation.id);
@@ -226,6 +312,7 @@ function App() {
       role: 'user',
       content,
       timestamp: Date.now(),
+      images,
     };
 
     const updatedMessages = [...(targetConversation.messages || []), userMessage];
@@ -249,10 +336,12 @@ function App() {
     setChatError(null);
     setLastUserMessage(content);
 
+    const convSettings = targetConversation?.settings || settings;
+
     await sendMessage(
       updatedMessages,
       selectedModelId,
-      settings,
+      convSettings,
       // onChunk
       (chunk) => {
         setStreamingContent(prev => prev + chunk);
@@ -417,7 +506,55 @@ function App() {
           ) : (
             <div className="pb-4">
               {currentConversation.messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
+                <div
+                  key={message.id}
+                  className="group relative"
+                >
+                  <MessageBubble message={message} />
+
+                  {/* Edit/Delete buttons for user messages (only when not streaming) */}
+                  {message.role === 'user' && !isStreaming && (
+                    <div className="absolute top-4 right-2 sm:right-4 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                      {editingMessageId === message.id ? (
+                        <>
+                          <button
+                            onClick={() => setEditingMessageId(null)}
+                            className="p-1.5 bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                            title="Huỷ"
+                          >
+                            <XIcon className="w-4 h-4 text-slate-600" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => setEditingMessageId(message.id)}
+                            className="p-1.5 bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                            title="Sửa tin nhắn"
+                          >
+                            <Pencil className="w-4 h-4 text-slate-600" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteMessage(message.id)}
+                            className="p-1.5 bg-slate-200 hover:bg-red-100 rounded-lg transition-colors"
+                            title="Xoá tin nhắn"
+                          >
+                            <Trash2 className="w-4 h-4 text-slate-600" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Edit mode: show textarea when editing */}
+                  {editingMessageId === message.id && (
+                    <EditMessageForm
+                      initialContent={message.content}
+                      onSave={(newContent) => handleEditMessage(message.id, newContent)}
+                      onCancel={() => setEditingMessageId(null)}
+                    />
+                  )}
+                </div>
               ))}
               {isStreaming && streamingContent && (
                 <MessageBubble
@@ -451,6 +588,7 @@ function App() {
           onSend={handleSendMessage}
           disabled={!currentApiKey || !selectedModelId}
           isLoading={isStreaming}
+          onStop={handleStop}
         />
       </main>
 
@@ -458,8 +596,12 @@ function App() {
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
-        settings={settings}
-        onSettingsChange={setSettings}
+        settings={getConversationSettings()}
+        onSettingsChange={handleSettingsChange}
+        conversationTitle={currentConversation?.title}
+        promptTemplates={promptTemplates}
+        onSaveTemplate={handleSaveTemplate}
+        onDeleteTemplate={handleDeleteTemplate}
       />
       <ApiKeyModal
         isOpen={showApiKey}
@@ -482,6 +624,75 @@ function App() {
 
       {/* PWA Install Prompt */}
       <InstallPrompt />
+    </div>
+  );
+}
+
+// Edit message inline form
+function EditMessageForm({
+  initialContent,
+  onSave,
+  onCancel,
+}: {
+  initialContent: string;
+  onSave: (content: string) => void;
+  onCancel: () => void;
+}) {
+  const [editContent, setEditContent] = useState(initialContent);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + 'px';
+    }
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (editContent.trim()) {
+        onSave(editContent.trim());
+      }
+    }
+    if (e.key === 'Escape') {
+      onCancel();
+    }
+  };
+
+  return (
+    <div className="px-3 sm:px-4 md:px-8 pb-4 bg-white">
+      <div className="max-w-3xl mx-auto flex gap-2 sm:gap-4">
+        <div className="w-7 h-7 sm:w-8 sm:h-8 flex-shrink-0" /> {/* Spacer for alignment */}
+        <div className="flex-1 min-w-0">
+          <textarea
+            ref={textareaRef}
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="w-full border border-slate-300 rounded-xl p-3 resize-none outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-sm"
+            rows={3}
+          />
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={() => editContent.trim() && onSave(editContent.trim())}
+              disabled={!editContent.trim()}
+              className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+            >
+              <Check className="w-4 h-4" />
+              Lưu
+            </button>
+            <button
+              onClick={onCancel}
+              className="px-4 py-1.5 bg-slate-200 text-slate-700 text-sm rounded-lg hover:bg-slate-300 transition-colors flex items-center gap-1.5"
+            >
+              <XIcon className="w-4 h-4" />
+              Huỷ
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

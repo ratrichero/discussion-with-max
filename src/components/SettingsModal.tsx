@@ -1,5 +1,6 @@
-import { ChatSettings, DEFAULT_SETTINGS } from '../types';
-import { X, RotateCcw } from 'lucide-react';
+import { useState } from 'react';
+import { ChatSettings, DEFAULT_SETTINGS, PromptTemplate } from '../types';
+import { X, RotateCcw, Save, Check } from 'lucide-react';
 
 
 interface SettingsModalProps {
@@ -7,20 +8,52 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: ChatSettings;
   onSettingsChange: (settings: ChatSettings) => void;
+  conversationTitle?: string;
+  promptTemplates: PromptTemplate[];
+  onSaveTemplate: (name: string, content: string) => void;
+  onDeleteTemplate: (id: string) => void;
 }
 
-export function SettingsModal({ isOpen, onClose, settings, onSettingsChange }: SettingsModalProps) {
+export function SettingsModal({ 
+  isOpen, 
+  onClose, 
+  settings, 
+  onSettingsChange,
+  conversationTitle,
+  promptTemplates,
+  onSaveTemplate,
+  onDeleteTemplate,
+}: SettingsModalProps) {
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('');
+
   if (!isOpen) return null;
 
   const handleReset = () => {
     onSettingsChange(DEFAULT_SETTINGS);
   };
 
+  const handleConfirmSaveTemplate = () => {
+    if (templateName.trim() && settings.systemPrompt.trim()) {
+      onSaveTemplate(templateName.trim(), settings.systemPrompt);
+      setTemplateName('');
+      setShowSaveTemplate(false);
+    }
+  };
+
+  const handleLoadTemplate = (template: PromptTemplate) => {
+    onSettingsChange({ ...settings, systemPrompt: template.content });
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
         <div className="flex items-center justify-between p-4 border-b">
-          <h2 className="text-lg font-semibold">Cài đặt nâng cao</h2>
+          <h2 className="text-lg font-semibold">
+            {conversationTitle
+              ? `Cài đặt cho: ${conversationTitle}`
+              : 'Cài đặt mặc định'}
+          </h2>
           <button 
             onClick={onClose}
             className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
@@ -32,7 +65,20 @@ export function SettingsModal({ isOpen, onClose, settings, onSettingsChange }: S
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
           {/* System Prompt */}
           <div>
-            <label className="block text-sm font-medium mb-2">System Prompt</label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm font-medium">System Prompt</label>
+              <button
+                onClick={() => {
+                  setTemplateName('');
+                  setShowSaveTemplate(!showSaveTemplate);
+                }}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                title="Lưu làm template"
+              >
+                <Save className="w-3.5 h-3.5" />
+                Lưu làm template
+              </button>
+            </div>
             <textarea
               value={settings.systemPrompt}
               onChange={(e) => onSettingsChange({ ...settings, systemPrompt: e.target.value })}
@@ -42,6 +88,73 @@ export function SettingsModal({ isOpen, onClose, settings, onSettingsChange }: S
             <p className="text-xs text-slate-500 mt-1">
               Định nghĩa vai trò và hành vi của AI
             </p>
+
+            {/* Save template form */}
+            {showSaveTemplate && (
+              <div className="mt-2 p-2 bg-slate-50 rounded-lg border flex items-center gap-2">
+                <input
+                  type="text"
+                  value={templateName}
+                  onChange={(e) => setTemplateName(e.target.value)}
+                  placeholder="Tên template..."
+                  className="flex-1 px-2 py-1.5 border rounded-md text-sm outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleConfirmSaveTemplate();
+                    if (e.key === 'Escape') setShowSaveTemplate(false);
+                  }}
+                />
+                <button
+                  onClick={handleConfirmSaveTemplate}
+                  disabled={!templateName.trim() || !settings.systemPrompt.trim()}
+                  className="p-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+                  title="Xác nhận"
+                >
+                  <Check className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => {
+                    setShowSaveTemplate(false);
+                    setTemplateName('');
+                  }}
+                  className="p-1.5 text-slate-600 hover:bg-slate-200 rounded-md transition-colors"
+                  title="Huỷ"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {/* Prompt Templates list */}
+            {promptTemplates.length > 0 && (
+              <div className="mt-3">
+                <label className="text-xs font-medium text-slate-500 mb-1.5 block">
+                  Prompt Templates
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {promptTemplates.map((template) => (
+                    <div
+                      key={template.id}
+                      className="group flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded-lg px-2.5 py-1.5 cursor-pointer transition-colors"
+                      onClick={() => handleLoadTemplate(template)}
+                      title={`Click để dùng: ${template.name}`}
+                    >
+                      <span>{template.name}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteTemplate(template.id);
+                        }}
+                        className="ml-0.5 p-0.5 rounded hover:bg-slate-500 transition-colors opacity-60 hover:opacity-100"
+                        title="Xoá template"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Temperature */}
