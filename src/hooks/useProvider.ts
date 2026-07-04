@@ -15,26 +15,20 @@ export function useProvider(
   customModelsRef.current = customModels;
   const lastFetchRef = useRef<string>('');
 
+  // Track proxy availability: null = unknown, true/false = detected
+  const proxyAvailableRef = useRef<boolean | null>(null);
+
   const fetchModels = useCallback(async () => {
-    if (!provider) {
-      setError('Chưa chọn provider');
-      return;
-    }
-    if (!apiKey) {
-      setError('Vui lòng nhập API Key');
-      return;
-    }
+    if (!provider) { setError('Chưa chọn provider'); return; }
+    if (!apiKey) { setError('Vui lòng nhập API Key'); return; }
 
     const fetchKey = `${provider.id}-${apiKey}`;
-    if (lastFetchRef.current === fetchKey && models.length > 0) {
-      return;
-    }
+    if (lastFetchRef.current === fetchKey && models.length > 0) return;
     lastFetchRef.current = fetchKey;
     setLoadingModels(true);
     setError(null);
 
     try {
-      // NVIDIA: Use hardcoded list + custom models
       if (provider.id === 'nvidia') {
         const customForProvider = customModelsRef.current.filter(m => m.isCustom);
         setModels([...NVIDIA_FREE_MODELS, ...customForProvider]);
@@ -42,18 +36,15 @@ export function useProvider(
         return;
       }
 
-      // Custom providers: Use their stored models
       if (!provider.isBuiltin) {
         setModels(customModelsRef.current.filter(m => m.isCustom));
         setLoadingModels(false);
         return;
       }
 
-      // OpenRouter & others: Fetch from API
       const response = await fetch(`${provider.baseUrl}${provider.modelsEndpoint || '/models'}`, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
       });
-
       if (!response.ok) throw new Error('Không thể lấy danh sách model');
 
       const data = await response.json();
@@ -88,6 +79,7 @@ export function useProvider(
     }
   }, [provider?.id, provider?.baseUrl, provider?.isBuiltin, provider?.filterFreeOnly, provider?.modelsEndpoint, apiKey]);
 
+  // ---- Send message with proxy support ----
   const sendMessage = useCallback(async (
     messages: Message[],
     modelId: string,
@@ -117,79 +109,20 @@ export function useProvider(
         max_tokens: settings.maxTokens,
         top_p: settings.topP,
       };
-
-      // Only include optional params if they have meaningful values
       if (settings.topK > 0) bodyPayload.top_k = settings.topK;
       if (settings.frequencyPenalty > 0) bodyPayload.frequency_penalty = settings.frequencyPenalty;
       if (settings.presencePenalty > 0) bodyPayload.presence_penalty = settings.presencePenalty;
 
-      const directUrl = `${provider.baseUrl}${provider.completionsEndpoint || '/chat/completions'}`;
-      let response: Response | null = null;
-
-      // ---- Strategy 1: Try proxy first (for providers that might need it) ----
-      const needsProxy = provider.id === 'nvidia' || !provider.isBuiltin;
+      const needsProxy = provider.id !== 'openrouter';
+      let response: Response;
 
       if (needsProxy) {
-        try {
-          response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              baseUrl: provider.baseUrl,
-              apiKey,
-              ...bodyPayload,
-            }),
-          });
-
-          // If proxy returns 404 HTML (proxy not deployed), response is not usable
-          const contentType = response.headers.get('content-type') || '';
-          if (response.status === 404 || contentType.includes('text/html')) {
-            response = null; // Mark as failed, will try direct
-          }
-        } catch {
-          response = null; // Proxy not available
-        }
+        response = await sendViaProxy(provider, apiKey, bodyPayload);
+      } else {
+        response = await sendDirect(provider, apiKey, bodyPayload);
       }
 
-      // ---- Strategy 2: Try direct call (fallback or for CORS-enabled providers) ----
-      if (!response) {
-        const directHeaders: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        };
-
-        // Provider-specific headers
-        if (provider.id === 'openrouter') {
-          directHeaders['HTTP-Referer'] = window.location.origin;
-          directHeaders['X-Title'] = 'AI Chat Vietnam';
-        }
-        if (provider.id === 'nvidia') {
-          directHeaders['Accept'] = 'text/event-stream';
-        }
-
-        try {
-          response = await fetch(directUrl, {
-            method: 'POST',
-            headers: directHeaders,
-            body: JSON.stringify(bodyPayload),
-          });
-        } catch (directErr) {
-          // Both proxy and direct failed
-          if (needsProxy) {
-            throw Object.assign(
-              new Error(
-                `Không thể kết nối đến ${provider.name}. ` +
-                `API này không hỗ trợ gọi trực tiếp từ trình duyệt (CORS). ` +
-                `Hãy deploy ứng dụng lên Vercel để sử dụng proxy server.`
-              ),
-              { code: 'CORS' }
-            );
-          }
-          throw directErr;
-        }
-      }
-
-      // ---- Handle response ----
+      // ---- Handle error responses ----
       if (!response.ok) {
         let errorMessage = 'Đã xảy ra lỗi khi gửi tin nhắn';
         try {
@@ -201,15 +134,18 @@ export function useProvider(
 
       // ---- Read streaming response ----
       const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
+      const decoder = new TextDecoder('utf-8');
       if (!reader) throw new Error('Không thể đọc response');
+
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -227,12 +163,120 @@ export function useProvider(
         }
       }
 
+      // Process remaining buffer
+      if (buffer.startsWith('data: ')) {
+        const data = buffer.slice(6);
+        if (data !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) onChunk(content);
+          } catch { /* ignore */ }
+        }
+      }
+
       onDone();
     } catch (err: unknown) {
       const error = err as Error & { code?: string };
       onError(error.message || 'Đã xảy ra lỗi', error.code);
     }
   }, [provider, apiKey]);
+
+  // ---- Proxy call ----
+  async function sendViaProxy(
+    provider: Provider,
+    apiKey: string,
+    bodyPayload: Record<string, unknown>
+  ): Promise<Response> {
+    // If we already know proxy is NOT available → go direct immediately
+    if (proxyAvailableRef.current === false) {
+      return sendDirect(provider, apiKey, bodyPayload);
+    }
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: provider.baseUrl,
+          apiKey,
+          ...bodyPayload,
+        }),
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+
+      // Proxy NOT deployed: Vercel returns 404 HTML page
+      if (response.status === 404 && contentType.includes('text/html')) {
+        proxyAvailableRef.current = false;
+        // Try direct as last resort
+        return sendDirectOrThrowCors(provider, apiKey, bodyPayload);
+      }
+
+      // Proxy IS deployed (any other response, including errors from upstream API)
+      proxyAvailableRef.current = true;
+      return response;
+    } catch (fetchErr) {
+      // Network error calling proxy itself
+      if (proxyAvailableRef.current === true) {
+        // Proxy was working before → this is a real network error, not CORS
+        throw Object.assign(
+          new Error('Lỗi kết nối đến proxy server. Kiểm tra kết nối mạng.'),
+          { code: 'NETWORK' }
+        );
+      }
+      // Never confirmed proxy → try direct
+      proxyAvailableRef.current = false;
+      return sendDirectOrThrowCors(provider, apiKey, bodyPayload);
+    }
+  }
+
+  // ---- Direct call (for OpenRouter etc.) ----
+  async function sendDirect(
+    provider: Provider,
+    apiKey: string,
+    bodyPayload: Record<string, unknown>
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    };
+
+    if (provider.id === 'openrouter') {
+      headers['HTTP-Referer'] = window.location.origin;
+      headers['X-Title'] = 'AI Chat Vietnam';
+    }
+    if (provider.id === 'nvidia') {
+      headers['Accept'] = 'text/event-stream';
+    }
+
+    const url = `${provider.baseUrl}${provider.completionsEndpoint || '/chat/completions'}`;
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+    });
+  }
+
+  // ---- Try direct, if CORS → clear error message ----
+  async function sendDirectOrThrowCors(
+    provider: Provider,
+    apiKey: string,
+    bodyPayload: Record<string, unknown>
+  ): Promise<Response> {
+    try {
+      return await sendDirect(provider, apiKey, bodyPayload);
+    } catch {
+      throw Object.assign(
+        new Error(
+          `Không thể kết nối đến ${provider.name}. ` +
+          `API này không hỗ trợ gọi trực tiếp từ trình duyệt (CORS). ` +
+          `Hãy deploy ứng dụng lên Vercel để sử dụng proxy server.`
+        ),
+        { code: 'CORS' }
+      );
+    }
+  }
 
   const resetModels = useCallback(() => {
     setModels([]);
