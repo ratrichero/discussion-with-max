@@ -1,17 +1,23 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+export const config = {
+  runtime: 'edge',
+};
 
-// Proxy endpoint for LLM API calls (bypasses CORS)
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Only allow POST
+export default async function handler(req: Request) {
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+      status: 405,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
-    const { baseUrl, apiKey, model, messages, stream, ...options } = req.body;
+    const { baseUrl, apiKey, model, messages, stream, ...options } = await req.json();
 
     if (!baseUrl || !apiKey || !model || !messages) {
-      return res.status(400).json({ error: 'Missing required fields: baseUrl, apiKey, model, messages' });
+      return new Response(
+        JSON.stringify({ error: { message: 'Missing required fields' } }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
     const headers: Record<string, string> = {
@@ -21,10 +27,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Provider-specific headers
     if (baseUrl.includes('nvidia')) {
-      headers['Accept'] = stream ? 'text/event-stream' : 'application/json';
+      headers['Accept'] = stream !== false ? 'text/event-stream' : 'application/json';
     }
     if (baseUrl.includes('openrouter')) {
-      headers['HTTP-Referer'] = req.headers.referer || 'https://ai-chat.vercel.app';
+      headers['HTTP-Referer'] = req.headers.get('referer') || 'https://ai-chat.vercel.app';
       headers['X-Title'] = 'AI Chat Vietnam';
     }
 
@@ -42,49 +48,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      return res.status(response.status).json({
-        error: errorData.error || { message: `HTTP ${response.status}` },
+      const errorText = await response.text();
+      let errorJson;
+      try {
+        errorJson = JSON.parse(errorText);
+      } catch {
+        errorJson = { error: { message: errorText || `HTTP ${response.status}` } };
+      }
+      return new Response(JSON.stringify(errorJson), {
+        status: response.status,
+        headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    // Handle streaming
-    if (stream !== false) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        return res.status(500).json({ error: 'Cannot read response stream' });
-      }
-
-      const decoder = new TextDecoder();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value, { stream: true });
-          res.write(chunk);
-        }
-      } finally {
-        reader.releaseLock();
-      }
-
-      res.end();
-    } else {
-      // Non-streaming response
-      const data = await response.json();
-      res.status(200).json(data);
+    // Streaming: pipe through
+    if (stream !== false && response.body) {
+      return new Response(response.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
     }
-  } catch (error) {
-    console.error('Proxy error:', error);
-    res.status(500).json({
-      error: {
-        message: error instanceof Error ? error.message : 'Internal server error',
-      },
+
+    // Non-streaming
+    const data = await response.json();
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
     });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: error instanceof Error ? error.message : 'Internal server error',
+        },
+      }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 }

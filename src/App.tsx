@@ -11,6 +11,7 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { AddModelModal } from './components/AddModelModal';
 import { AddProviderModal } from './components/AddProviderModal';
 import { ErrorBubble } from './components/ErrorBubble';
+import { InstallPrompt } from './components/InstallPrompt';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { useProvider } from './hooks/useProvider';
 import { 
@@ -478,6 +479,9 @@ function App() {
         onClose={() => setShowAddProvider(false)}
         onAdd={handleAddProvider}
       />
+
+      {/* PWA Install Prompt */}
+      <InstallPrompt />
     </div>
   );
 }
